@@ -4,47 +4,73 @@ import requests
 from bs4 import BeautifulSoup as Bs
 
 
-def link_name_parser():
-    url = 'https://www.aspca.org/pet-care/animal-poison-control/dogs-plant-list'
+class Parser:
 
-    response = requests.get(url)
-    html = Bs(response.content, 'html.parser')
-    links = html.find_all("a", href=re.compile("^/pet-care/animal-poison-control/toxic-and-non-toxic-plants/"))
-    name_link_dict = {link.get_text().strip(): link.get("href") for link in links}
-    contents_parser(name_link_dict=name_link_dict)
+    def __init__(self):
+        self.animals_name = None
+
+    def get_html(self, url):
+        if url:
+            response = requests.get(url)
+            html = Bs(response.content, 'html.parser')
+            return html
+        else:
+            print('Don`t have url')
+
+    def link_name_parser(self):
+        animals = {
+            'cats': 'cats-plant-list',
+            'dogs': 'dogs-plant-list',
+            'horses': 'horse-plant-list',
+        }
+        for animals_name, link in animals.items():
+            url = f'https://www.aspca.org/pet-care/animal-poison-control/{link}'
+            html = self.get_html(url)
+            links = html.find_all("a", href=re.compile("^/pet-care/animal-poison-control/toxic-and-non-toxic-plants/"))
+            name_link_dict = {link.get_text().strip(): link.get("href") for link in links}
+            self.animals_name = animals_name
+            self.contents_parser(name_link_dict=name_link_dict)
+
+    def contents_parser(self, name_link_dict):
+        for name, link in name_link_dict.items():
+            url = f"https://www.aspca.org{link}"
+            html = self.get_html(url)
+
+            names = html.find_all(class_="label-inline-format-label")
+            contents = html.find_all(class_="values")
+            img_tag = html.find("img")
+
+            names_list = [element.get_text(separator=' ').rstrip(':') for element in names]
+            contents_list = [element.get_text(separator=' ') for element in contents]
+
+            contents_dict = {name: content for name, content in zip(names_list, contents_list)}
+            contents_dict['name'] = name
+
+            image_link = img_tag['data-echo'] if img_tag else None
+            if image_link:
+                Downloader(img_url=image_link, plant_name=name, directory_name=self.animals_name)
+            else:
+                print(f'{name}')
 
 
-def contents_parser(name_link_dict):
-    for name, link in name_link_dict.items():
-        url = f"https://www.aspca.org{link}"
-        response = requests.get(url)
-        html = Bs(response.content, 'html.parser')
+class Downloader:
+    def __init__(self, img_url, plant_name, directory_name):
+        self.directory_name = directory_name
+        self.img_url = img_url
+        self.plant_name = plant_name
+        self.download_image() if img_url else None
 
-        names = html.find_all(class_="label-inline-format-label")
-        contents = html.find_all(class_="values")
+    def download_image(self):
+        response = requests.get(self.img_url)
 
-        names_list = [element.get_text(separator=' ').rstrip(':') for element in names]
-        contents_list = [element.get_text(separator=' ') for element in contents]
+        images_directory = f"{self.directory_name}"
+        if not os.path.exists(images_directory):
+            os.makedirs(images_directory)
 
-        contents_dict = {name: content for name, content in zip(names_list, contents_list)}
-        contents_dict['name'] = name
-
-        img_tag = html.find("img")
-        image_link = img_tag['data-echo']
-        if image_link:
-            download_image(img_url=image_link, plant_name=name)
-
-
-def download_image(img_url, plant_name):
-    response = requests.get(img_url)
-
-    images_directory = "images"
-    if not os.path.exists(images_directory):
-        os.makedirs(images_directory)
-
-    with open(os.path.join(images_directory, f"{plant_name}.jpg"), "wb") as img_file:
-        img_file.write(response.content)
+        with open(os.path.join(images_directory, f"{self.plant_name}.jpg"), "wb") as img_file:
+            img_file.write(response.content)
 
 
 if __name__ == "__main__":
-    link_name_parser()
+    parser = Parser()
+    parser.link_name_parser()
