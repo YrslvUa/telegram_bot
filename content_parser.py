@@ -1,6 +1,11 @@
+import functools
 import os
 import re
-import requests
+import asyncio
+from time import time
+
+import aiofiles
+import httpx
 from bs4 import BeautifulSoup as Bs
 
 
@@ -9,18 +14,19 @@ class Parser:
     def __init__(self):
         self.animals_name = None
 
-    def get_html(self, url):
+    async def get_html(self, url):
         if url:
-            response = requests.get(url)
-            if response.status_code == 200:
-                html = Bs(response.content, 'html.parser')
-                return html
-            else:
-                print(f"Error: Unable to fetch URL ({response.status_code})")
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                if response.status_code == 200:
+                    html = Bs(response.content, 'html.parser')
+                    return html
+                else:
+                    print(f"Error: Unable to fetch URL ({response.status_code})\nURL: {url}")
         else:
             print('Error: URL not provided')
 
-    def link_name_parser(self):
+    async def link_name_parser(self):
         animals = {
             'cats': 'cats-plant-list',
             'dogs': 'dogs-plant-list',
@@ -28,17 +34,26 @@ class Parser:
         }
         for animals_name, link in animals.items():
             url = f'https://www.aspca.org/pet-care/animal-poison-control/{link}'
-            html = self.get_html(url)
+            html = await self.get_html(url)
             if html:
-                links = html.find_all("a", href=re.compile("^/pet-care/animal-poison-control/toxic-and-non-toxic-plants/"))
+                links = html.find_all("a",
+                                      href=re.compile("^/pet-care/animal-poison-control/toxic-and-non-toxic-plants/"))
                 name_link_dict = {link.get_text().strip(): link.get("href") for link in links}
                 self.animals_name = animals_name
-                self.contents_parser(name_link_dict=name_link_dict)
+                await self.contents_parser(name_link_dict=name_link_dict)
 
-    def contents_parser(self, name_link_dict):
-        for name, link in name_link_dict.items():
-            url = f"https://www.aspca.org{link}"
-            html = self.get_html(url)
+    async def contents_parser(self, name_link_dict):
+        semaphore = asyncio.Semaphore(5)
+        async with httpx.AsyncClient() as client:
+            tasks = []
+            for name, link in name_link_dict.items():
+                url = f"https://www.aspca.org{link}"
+                tasks.append(self.parse_plant(client, url, name, semaphore))
+            await asyncio.gather(*tasks)
+
+    async def parse_plant(self, client, url, name, semaphore):
+        async with semaphore:
+            html = await self.get_html(url)
             if html:
                 names = html.find_all(class_="label-inline-format-label")
                 contents = html.find_all(class_="values")
@@ -52,30 +67,40 @@ class Parser:
 
                 image_link = img_tag['data-echo'] if img_tag else None
                 if image_link:
-                    Downloader(img_url=image_link, plant_name=name, directory_name=self.animals_name)
-                else:
-                    print(f'{name}')
+                    await self.download_image(client, image_link, name)
+
+    async def download_image(self, client, img_url, plant_name):
+        async with client.stream('GET', img_url) as response:
+            images_directory = f"{self.animals_name}"
+            if not os.path.exists(images_directory):
+                os.makedirs(images_directory)
+
+            valid_plant_name = plant_name.replace('"', '').replace('/', '_')
+
+            file_path = os.path.join(images_directory, f"{valid_plant_name}.jpg")
+            async with aiofiles.open(file_path, "wb") as file:
+                async for chunk in response.aiter_bytes():
+                    await file.write(chunk)
 
 
-class Downloader:
-    def __init__(self, img_url, plant_name, directory_name):
-        self.directory_name = directory_name
-        self.img_url = img_url
-        self.plant_name = plant_name
-        if img_url:
-            self.download_image()
+def get_time(func):
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        start_time = time()
+        result = await func(*args, **kwargs)
+        end_time = time()
+        execution_time = end_time - start_time
+        print(f"Функція {func.__name__} виконана за {execution_time} секунд")
+        return result
+    return wrapper
 
-    def download_image(self):
-        response = requests.get(self.img_url)
 
-        images_directory = f"{self.directory_name}"
-        if not os.path.exists(images_directory):
-            os.makedirs(images_directory)
-
-        with open(os.path.join(images_directory, f"{self.plant_name}.jpg"), "wb") as img_file:
-            img_file.write(response.content)
+@get_time
+async def main():
+    parser = Parser()
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    await parser.link_name_parser()
 
 
 if __name__ == "__main__":
-    parser = Parser()
-    parser.link_name_parser()
+    asyncio.run(main())
